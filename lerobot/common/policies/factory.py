@@ -23,6 +23,7 @@ from lerobot.common.datasets.utils import dataset_to_policy_features
 from lerobot.common.envs.configs import EnvConfig
 from lerobot.common.envs.utils import env_to_policy_features
 from lerobot.common.policies.act.configuration_act import ACTConfig
+from lerobot.common.policies.dit.configuration_dit import DiTConfig
 from lerobot.common.policies.diffusion.configuration_diffusion import DiffusionConfig
 from lerobot.common.policies.pi0.configuration_pi0 import PI0Config
 from lerobot.common.policies.pretrained import PreTrainedPolicy
@@ -42,6 +43,10 @@ def get_policy_class(name: str) -> PreTrainedPolicy:
         from lerobot.common.policies.diffusion.modeling_diffusion import DiffusionPolicy
 
         return DiffusionPolicy
+    elif name == "dit":
+        from lerobot.common.policies.dit.modeling_dit import DiTPolicy
+
+        return DiTPolicy
     elif name == "act":
         from lerobot.common.policies.act.modeling_act import ACTPolicy
 
@@ -61,6 +66,8 @@ def get_policy_class(name: str) -> PreTrainedPolicy:
 def make_policy_config(policy_type: str, **kwargs) -> PreTrainedConfig:
     if policy_type == "tdmpc":
         return TDMPCConfig(**kwargs)
+    elif policy_type == "dit":
+        return DiTConfig(**kwargs)
     elif policy_type == "diffusion":
         return DiffusionConfig(**kwargs)
     elif policy_type == "act":

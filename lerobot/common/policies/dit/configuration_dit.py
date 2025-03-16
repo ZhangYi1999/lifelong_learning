@@ -10,7 +10,7 @@ from lerobot.configs.types import NormalizationMode
 class DiTConfig(PreTrainedConfig):
     # Input / output structure.
     n_obs_steps: int = 2
-    horizon: int = 16 # action steps that the model predict
+    horizon: int = 100 # action steps that the model predict
     n_action_steps: int = 8 # action steps that the model 
 
     normalization_mapping: dict[str, NormalizationMode] = field(
@@ -24,8 +24,8 @@ class DiTConfig(PreTrainedConfig):
     # Architecture.
     # Vision backbone.
     vision_backbone_size: int = 18
-    pretrained_backbone_weights: str | None = "IMAGENET1K_V1"
-    avg_pool: bool = False
+    pretrained_backbone_weights: str | None = None
+    avg_pool: bool = True
     vision_backbone_norm_name: str = "group_norm"
     vision_backbone_norm_num_groups: int = 16
     use_separate_rgb_encoder_per_camera = True
@@ -69,9 +69,9 @@ class DiTConfig(PreTrainedConfig):
         super().__post_init__()
 
         """Input validation (not exhaustive)."""
-        if not self.vision_backbone.startswith("resnet"):
+        if self.vision_backbone_size not in [18, 34, 50]:
             raise ValueError(
-                f"`vision_backbone` must be one of the ResNet variants. Got {self.vision_backbone}."
+                f"`vision_backbone_size` must be one of the ResNet variants. Got {self.vision_backbone_size}."
             )
         supported_prediction_types = ["epsilon", "sample"]
         if self.prediction_type not in supported_prediction_types:
@@ -84,15 +84,12 @@ class DiTConfig(PreTrainedConfig):
                 f"`noise_scheduler_type` must be one of {supported_noise_schedulers}. "
                 f"Got {self.noise_scheduler_type}."
             )
-        if self.n_action_steps > self.chunk_size:
+        if self.n_action_steps > self.horizon:
             raise ValueError(
                 f"The chunk size is the upper bound for the number of action steps per model invocation. Got "
-                f"{self.n_action_steps} for `n_action_steps` and {self.chunk_size} for `chunk_size`."
+                f"{self.n_action_steps} for `n_action_steps` and {self.horizon} for `chunk_size`."
             )
-        if self.n_obs_steps != 1:
-            raise ValueError(
-                f"Multiple observation steps not handled yet. Got `nobs_steps={self.n_obs_steps}`"
-            )
+
 
     def get_optimizer_preset(self) -> AdamWConfig:
         return AdamWConfig(
@@ -112,15 +109,6 @@ class DiTConfig(PreTrainedConfig):
     def validate_features(self) -> None:
         if not self.image_features and not self.env_state_feature:
             raise ValueError("You must provide at least one image or the environment state among the inputs.")
-
-        if self.crop_shape is not None:
-            for key, image_ft in self.image_features.items():
-                if self.crop_shape[0] > image_ft.shape[1] or self.crop_shape[1] > image_ft.shape[2]:
-                    raise ValueError(
-                        f"`crop_shape` should fit within the images shapes. Got {self.crop_shape} "
-                        f"for `crop_shape` and {image_ft.shape} for "
-                        f"`{key}`."
-                    )
 
         # Check that all input images have the same shape.
         first_image_key, first_image_ft = next(iter(self.image_features.items()))

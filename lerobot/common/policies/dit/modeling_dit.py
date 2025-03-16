@@ -178,7 +178,6 @@ class DiT(nn.Module):
             beta_end=config.beta_end,
             beta_schedule=config.beta_schedule,
             clip_sample=config.clip_sample,
-            clip_sample_range=config.clip_sample_range,
             prediction_type=config.prediction_type,
         )
 
@@ -204,12 +203,14 @@ class DiT(nn.Module):
 
         self.noise_scheduler.set_timesteps(self.num_inference_steps)
 
+        enc_cache = self.noise_net.forward_enc(global_cond)
+
         for t in self.noise_scheduler.timesteps:
             # Predict model output.
-            model_output = self.noise_net(
-                sample,
+            model_output = self.noise_net.forward_dec(
+                sample, 
                 torch.full(sample.shape[:1], t, dtype=torch.long, device=sample.device),
-                global_cond=global_cond,
+                enc_cache
             )
             # Compute previous image: x_t -> x_t-1
             sample = self.noise_scheduler.step(model_output, t, sample, generator=generator).prev_sample
@@ -326,7 +327,7 @@ class DiT(nn.Module):
         noisy_trajectory = self.noise_scheduler.add_noise(trajectory, eps, timesteps)
 
         # Run the denoising network (that might denoise the trajectory, or attempt to predict the noise).
-        pred = self.noise_net(noisy_trajectory, timesteps, global_cond=global_cond)
+        _, pred = self.noise_net(noisy_trajectory, timesteps, global_cond=global_cond)
 
         # Compute the loss.
         # The target is either the original trajectory, or the noise.
@@ -340,14 +341,14 @@ class DiT(nn.Module):
         loss = F.mse_loss(pred, target, reduction="none")
 
         # Mask loss wherever the action is padded with copies (edges of the dataset trajectory).
-        if self.config.do_mask_loss_for_padding:
-            if "action_is_pad" not in batch:
-                raise ValueError(
-                    "You need to provide 'action_is_pad' in the batch when "
-                    f"{self.config.do_mask_loss_for_padding=}."
-                )
-            in_episode_bound = ~batch["action_is_pad"]
-            loss = loss * in_episode_bound.unsqueeze(-1)
+        # if self.config.do_mask_loss_for_padding:
+        #     if "action_is_pad" not in batch:
+        #         raise ValueError(
+        #             "You need to provide 'action_is_pad' in the batch when "
+        #             f"{self.config.do_mask_loss_for_padding=}."
+        #         )
+        #     in_episode_bound = ~batch["action_is_pad"]
+        #     loss = loss * in_episode_bound.unsqueeze(-1)
 
         return loss.mean()
 
@@ -396,16 +397,16 @@ class DiTNoiseNet(nn.Module):
             )
         )
 
-    def forward(self, noise_actions, time, obs_enc, enc_cache=None):
+    def forward(self, noise_actions, time, global_cond, enc_cache=None):
         if enc_cache is None:
-            enc_cache = self.forward_enc(obs_enc)
+            enc_cache = self.forward_enc(global_cond)
         return enc_cache, self.forward_dec(noise_actions, time, enc_cache)
     
-    def forward_enc(self, obs_enc):
+    def forward_enc(self, global_cond):
         # reshape global condition from (B T dim_model) into (T B dim_model)
-        obs_enc = einops.rearrange(obs_enc, 'B T ... -> T B ...')
-        pos = self.enc_pos(obs_enc)
-        enc_cache = self.encoder(obs_enc, pos)
+        global_cond = einops.rearrange(global_cond, 'B T ... -> T B ...')
+        pos = self.enc_pos(global_cond)
+        enc_cache = self.encoder(global_cond, pos)
         return enc_cache
 
     def forward_dec(self, noise_actions, time, enc_cache):
@@ -420,7 +421,8 @@ class DiTNoiseNet(nn.Module):
         dec_out = self.decoder(dec_in, time_enc, enc_cache)
 
         # apply final epsilon prediction layer
-        return self.eps_out(dec_out, time_enc, enc_cache[-1])
+        output = self.eps_out(dec_out, time_enc, enc_cache[-1])
+        return output
     
 
 class DiTEncoder(nn.Module):
@@ -432,9 +434,9 @@ class DiTEncoder(nn.Module):
         for layer in self.layers:
             layer.reset_parameters()
     
-    def forward(self, x: Tensor, pos_embed: Tensor | None = None, key_padding_mask: Tensor | None = None) -> Tensor:
+    def forward(self, x: Tensor, pos_embed: Tensor | None = None) -> Tensor:
         for layer in self.layers:
-            x = layer(x, pos_embed=pos_embed, key_padding_mask=key_padding_mask)
+            x = layer(x, pos_embed=pos_embed)
         return x
 
 
@@ -457,8 +459,8 @@ class DiTEncoderLayer(nn.Module):
 
         self.activation = get_activation_fn(config.feedforward_activation)
 
-    def forward(self, src, pos):
-        q = k = with_pos_embed(src, pos)
+    def forward(self, src, pos_embed):
+        q = k = with_pos_embed(src, pos_embed)
         src2, _ = self.self_attn(q, k, value=src, need_weights=False)
         src = src + self.dropout1(src2)
         src = self.norm1(src)
@@ -575,32 +577,25 @@ class DiTRgbEncoder(nn.Module):
     def __init__(self, config: DiTConfig):
         super().__init__()
         norm_layer = _make_norm(config.vision_backbone_norm_name, config.vision_backbone_norm_num_groups)
-        size = config.vision_backbone_size
+        self._size = config.vision_backbone_size
         weights = config.pretrained_backbone_weights
-        model = _construct_resnet(size, norm_layer, weights)
-        model.fc = nn.Identity()
+        self._model = _construct_resnet(self._size, norm_layer, weights)
+        self._model.fc = nn.Identity()
+        self._avg_pool = config.avg_pool
         if not config.avg_pool:
-            model.avgpool = nn.Identity()
+            self._model.avgpool = nn.Identity()
 
-    def forward(self, x: Tensor) -> Tensor:
-        """
-        Args:
-            x: (B, C, H, W) image tensor with pixel values in [0, 1].
-        Returns:
-            (B, D) image feature.
-        """
-        # Preprocess: maybe crop (if it was set up in the __init__).
-        if self.do_crop:
-            if self.training:  # noqa: SIM108
-                x = self.maybe_random_crop(x)
-            else:
-                # Always use center crop for eval.
-                x = self.center_crop(x)
-        # Extract backbone feature.
-        x = torch.flatten(self.pool(self.backbone(x)), start_dim=1)
-        # Final linear layer with non-linearity.
-        x = self.relu(self.out(x))
-        return x
+    def forward(self, x):
+        if self._avg_pool:
+            return self._model(x)[:, None]
+        B = x.shape[0]
+        x = self._model(x)
+        x = x.reshape((B, self.embed_dim, -1))
+        return x.transpose(1, 2)
+    
+    @property
+    def embed_dim(self):
+        return {18: 512, 34: 512, 50: 2048}[self._size]
 
 
 def _make_norm(norm_name, norm_num_groups):
