@@ -10,7 +10,7 @@ from lerobot.configs.types import NormalizationMode
 class DiTConfig(PreTrainedConfig):
     # Input / output structure.
     n_obs_steps: int = 2
-    horizon: int = 100 # action steps that the model predict
+    horizon: int = 16 # action steps that the model predict
     n_action_steps: int = 8 # action steps that the model 
 
     normalization_mapping: dict[str, NormalizationMode] = field(
@@ -29,6 +29,14 @@ class DiTConfig(PreTrainedConfig):
     vision_backbone_norm_name: str = "group_norm"
     vision_backbone_norm_num_groups: int = 16
     use_separate_rgb_encoder_per_camera = True
+
+    # for spatial softmax resnet encoder
+    use_spatial_softmax:bool = False
+    vision_backbone: str = "resnet18"
+    crop_shape: tuple[int, int] | None = (84, 84)
+    crop_is_random: bool = True
+    use_group_norm: bool = True
+    spatial_softmax_num_keypoints: int = 32
 
     # Transformer layers.
     dim_model: int = 512
